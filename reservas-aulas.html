@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Reserva de Aulas de Informática</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .cell-libre:hover { transform: scale(1.02); }
+  /* Espacio del recreo entre 3ª y 4ª hora */
+  tr.recreo > td { padding-top: 22px; border-top: 3px double #cbd5e1 !important; position: relative; }
+  tr.recreo > td:first-child::before {
+    content: "☕ recreo";
+    position: absolute;
+    top: 2px; left: 8px;
+    font-size: 10px; color: #94a3b8; font-weight: 600;
+    letter-spacing: 0.5px;
+  }
+  /* Indicador de conexión */
+  #estadoSync {
+    position: fixed; bottom: 12px; right: 12px;
+    padding: 6px 12px; border-radius: 999px;
+    font-size: 12px; font-weight: 600;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    transition: all 0.3s;
+    z-index: 50;
+  }
+  .sync-ok { background: #dcfce7; color: #166534; }
+  .sync-loading { background: #fef3c7; color: #92400e; }
+  .sync-error { background: #fee2e2; color: #991b1b; }
+</style>
+</head>
+<body class="bg-gradient-to-br from-slate-100 to-slate-200 min-h-screen">
+
+<div class="max-w-7xl mx-auto p-4 sm:p-6">
+
+  <!-- Cabecera -->
+  <header class="bg-white rounded-2xl shadow-lg p-6 mb-6 border-t-4 border-indigo-500">
+    <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+      <div>
+        <h1 class="text-3xl font-bold text-slate-800">📅 Reserva de Aulas de Informática</h1>
+        <p class="text-slate-500 mt-1">Gestión semanal de las 3 aulas del centro · Sincronización en tiempo real</p>
+      </div>
+      <div class="flex items-center gap-3">
+        <label class="text-sm font-medium text-slate-600">Modo:</label>
+        <select id="modo" class="rounded-lg border-slate-300 border px-3 py-2 text-sm bg-white shadow-sm">
+          <option value="docente">👩‍🏫 Docente (reservar)</option>
+          <option value="admin">🔒 Responsable (bloquear)</option>
+        </select>
+      </div>
+    </div>
+  </header>
+
+  <!-- Navegación semanal -->
+  <div class="bg-white rounded-2xl shadow-md p-4 mb-6 flex flex-wrap items-center justify-between gap-3">
+    <div class="flex gap-2">
+      <button id="prevWeek" class="px-4 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium transition">← Anterior</button>
+      <button id="hoyBtn" class="px-4 py-2 rounded-lg bg-indigo-500 hover:bg-indigo-600 text-white font-medium transition">Hoy</button>
+      <button id="nextWeek" class="px-4 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium transition">Siguiente →</button>
+    </div>
+    <div id="rangoSemana" class="text-lg font-semibold text-slate-700"></div>
+    <input type="week" id="selectorSemana" class="border rounded-lg px-3 py-2 text-sm" />
+  </div>
+
+  <!-- Aulas -->
+  <div id="aulasContainer" class="space-y-6"></div>
+
+  <!-- Instrucciones -->
+  <div class="mt-8 bg-white rounded-2xl shadow-md p-6 text-sm text-slate-600">
+    <h3 class="font-bold text-slate-800 mb-2">ℹ️ Cómo usar</h3>
+    <ul class="list-disc pl-5 space-y-1">
+      <li><b>Docente</b>: haz clic en una casilla verde libre para reservarla indicando tu <b>nombre</b> y <b>departamento</b>.</li>
+      <li><b>Docente</b>: puedes cancelar tu propia reserva escribiendo el mismo nombre.</li>
+      <li><b>Responsable</b>: al bloquear una hora, queda bloqueada esa misma hora <b>todas las semanas siguientes</b>. Al desbloquearla, queda libre desde esa semana en adelante (las semanas pasadas se conservan bloqueadas para trazabilidad).</li>
+      <li>Usa las flechas o el selector para navegar entre semanas del curso.</li>
+      <li>Los datos se guardan en <b>Firebase Firestore</b> y se sincronizan en tiempo real entre todos los usuarios.</li>
+    </ul>
+    <div class="mt-4 flex gap-2">
+      <button id="exportarBtn" class="px-3 py-1.5 rounded-lg bg-slate-800 text-white text-xs hover:bg-slate-700">Exportar datos</button>
+      <button id="importarBtn" class="px-3 py-1.5 rounded-lg bg-slate-200 text-slate-700 text-xs hover:bg-slate-300">Importar datos</button>
+      <button id="resetBtn" class="px-3 py-1.5 rounded-lg bg-red-100 text-red-700 text-xs hover:bg-red-200">Borrar todo</button>
+    </div>
+  </div>
+
+</div>
+
+<div id="estadoSync" class="sync-loading">⏳ Conectando…</div>
+
+<script type="module">
+  // =====================================================================
+  //  FIREBASE - configuración e inicialización
+  // =====================================================================
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
+  import {
+    getFirestore, collection, doc, onSnapshot,
+    setDoc, deleteDoc, runTransaction, writeBatch, getDocs
+  } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyDqFMeNvC5G7SJ2O_U-GxgRHZjxuSX0EdY", // ⚠️ Pega aquí tu apiKey real de Firebase Console (es una clave pública, no secreta)
+    authDomain: "reservaaulas-76b1a.firebaseapp.com",
+    projectId: "reservaaulas-76b1a",
+    storageBucket: "reservaaulas-76b1a.firebasestorage.app",
+    messagingSenderId: "1124206622",
+    appId: "1:1124206622:web:9f77d907856fc754edc60f"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db  = getFirestore(app);
+
+  // Colecciones:
+  //   reservas/{aulaId__YYYY-MM-DD__horaIdx}  -> { aulaId, fecha, horaIdx, nombre, departamento }
+  //   bloqueosRec/{aulaId__diaSemana__horaIdx} -> { aulaId, diaSemana, horaIdx, items: [{desde,hasta,motivo}] }
+  const COL_RESERVAS = collection(db, "reservas");
+  const COL_BLOQUEOS = collection(db, "bloqueosRec");
+
+  // Estado UI de sincronización
+  const estadoSync = document.getElementById('estadoSync');
+  function setSync(estado, texto){
+    estadoSync.className = estado;
+    estadoSync.textContent = texto;
+  }
+
+  // =====================================================================
+  //  CONFIGURACIÓN de la aplicación
+  // =====================================================================
+  const AULAS = [
+    { id: "S116", nombre: "S116", capacidad: "26 ordenadores de sobremesa" },
+    { id: "N126", nombre: "N126", capacidad: "27 ordenadores de sobremesa" },
+    { id: "S201", nombre: "S201", capacidad: "19 ordenadores portátiles" },
+  ];
+  const HORAS = ["1ª hora","2ª hora","3ª hora","4ª hora","5ª hora","6ª hora"];
+  const DIAS  = ["Lunes","Martes","Miércoles","Jueves","Viernes"];
+  const CODIGO_RESPONSABLE = "33029901";
+
+  // Estructura en memoria (espejo local de Firestore, para renderizar rápido)
+  //   store.reservas:    { "aulaId|YYYY-MM-DD|horaIdx": { nombre, departamento } }
+  //   store.bloqueosRec: { "aulaId|diaSemana|horaIdx": [ {desde, hasta, motivo}, ... ] }
+  let store = { reservas: {}, bloqueosRec: {} };
+  let adminAutenticada = false;
+  let fechaActual = new Date();
+
+  // IDs de documento <-> claves internas
+  const reservaDocId = (aulaId, fechaISO, horaIdx) => `${aulaId}__${fechaISO}__${horaIdx}`;
+  const reservaKey   = (aulaId, fechaISO, horaIdx) => `${aulaId}|${fechaISO}|${horaIdx}`;
+  const bloqueoDocId = (aulaId, diaSemana, horaIdx) => `${aulaId}__${diaSemana}__${horaIdx}`;
+  const bloqueoKey   = (aulaId, diaSemana, horaIdx) => `${aulaId}|${diaSemana}|${horaIdx}`;
+
+  // =====================================================================
+  //  UTILIDADES DE FECHA
+  // =====================================================================
+  function esPasado(fechaISO){
+    const hoy = new Date(); hoy.setHours(0,0,0,0);
+    const [y,m,d] = fechaISO.split('-').map(Number);
+    const f = new Date(y, m-1, d); f.setHours(0,0,0,0);
+    return f < hoy;
+  }
+  function lunesDe(fecha){
+    const d = new Date(fecha);
+    const dia = d.getDay();
+    const diff = (dia === 0 ? -6 : 1 - dia);
+    d.setDate(d.getDate() + diff);
+    d.setHours(0,0,0,0);
+    return d;
+  }
+  function fmtISO(d){
+    const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,'0'), dd=String(d.getDate()).padStart(2,'0');
+    return `${y}-${m}-${dd}`;
+  }
+  function fmtCorto(d){
+    return d.toLocaleDateString('es-ES', { day:'2-digit', month:'short' });
+  }
+  function mismaFecha(a,b){ return a.getFullYear()===b.getFullYear() && a.getMonth()===b.getMonth() && a.getDate()===b.getDate(); }
+  function restarDia(fechaISO){
+    const [y,m,d] = fechaISO.split('-').map(Number);
+    const f = new Date(y, m-1, d);
+    f.setDate(f.getDate()-1);
+    return fmtISO(f);
+  }
+  function compararISO(a,b){ return a < b ? -1 : (a > b ? 1 : 0); }
+  function getISOWeek(date) {
+    const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+    const day = d.getUTCDay() || 7;
+    d.setUTCDate(d.getUTCDate() + 4 - day);
+    const yearStart = new Date(Date.UTC(d.getUTCFullYear(),0,1));
+    const weekNo = Math.ceil((((d - yearStart) / 86400000) + 1)/7);
+    return { year: d.getUTCFullYear(), week: weekNo };
+  }
+  function setSelectorSemana(){
+    const {year, week} = getISOWeek(fechaActual);
+    document.getElementById('selectorSemana').value = `${year}-W${String(week).padStart(2,'0')}`;
+  }
+
+  // Devuelve el bloqueo activo (recurrente) para un aula/día/hora en una fecha concreta
+  function bloqueoActivo(aulaId, diaSemana, horaIdx, fechaISO){
+    const arr = store.bloqueosRec[bloqueoKey(aulaId, diaSemana, horaIdx)] || [];
+    for(const b of arr){
+      if(compararISO(fechaISO, b.desde) >= 0 && (b.hasta === null || compararISO(fechaISO, b.hasta) <= 0)){
+        return b;
+      }
+    }
+    return null;
+  }
+
+  // =====================================================================
+  //  SINCRONIZACIÓN EN TIEMPO REAL (onSnapshot)
+  // =====================================================================
+  let primeraCargaReservas = false;
+  let primeraCargaBloqueos = false;
+  function marcarListoSiCorresponde(){
+    if(primeraCargaReservas && primeraCargaBloqueos){
+      setSync('sync-ok', '🟢 Sincronizado');
+    }
+  }
+
+  onSnapshot(COL_RESERVAS, (snap) => {
+    store.reservas = {};
+    snap.forEach(d => {
+      const data = d.data();
+      if(!data || !data.aulaId) return;
+      const k = reservaKey(data.aulaId, data.fecha, data.horaIdx);
+      store.reservas[k] = { nombre: data.nombre || '', departamento: data.departamento || '' };
+    });
+    primeraCargaReservas = true;
+    marcarListoSiCorresponde();
+    render();
+  }, (err) => {
+    console.error("Error onSnapshot reservas:", err);
+    setSync('sync-error', '⚠️ Error de conexión');
+  });
+
+  onSnapshot(COL_BLOQUEOS, (snap) => {
+    store.bloqueosRec = {};
+    snap.forEach(d => {
+      const data = d.data();
+      if(!data || !data.aulaId) return;
+      const k = bloqueoKey(data.aulaId, data.diaSemana, data.horaIdx);
+      store.bloqueosRec[k] = Array.isArray(data.items) ? data.items : [];
+    });
+    primeraCargaBloqueos = true;
+    marcarListoSiCorresponde();
+    render();
+  }, (err) => {
+    console.error("Error onSnapshot bloqueos:", err);
+    setSync('sync-error', '⚠️ Error de conexión');
+  });
+
+  // =====================================================================
+  //  RENDER
+  // =====================================================================
+  function render(){
+    const lunes = lunesDe(fechaActual);
+    const viernes = new Date(lunes); viernes.setDate(lunes.getDate()+4);
+    document.getElementById('rangoSemana').textContent =
+      `Semana del ${fmtCorto(lunes)} al ${fmtCorto(viernes)} de ${viernes.getFullYear()}`;
+    setSelectorSemana();
+
+    const cont = document.getElementById('aulasContainer');
+    cont.innerHTML = '';
+    const hoy = new Date(); hoy.setHours(0,0,0,0);
+
+    AULAS.forEach((aula, idxAula) => {
+      const colores = [
+        {border:'border-blue-500', chip:'bg-blue-100 text-blue-700'},
+        {border:'border-emerald-500', chip:'bg-emerald-100 text-emerald-700'},
+        {border:'border-amber-500', chip:'bg-amber-100 text-amber-700'},
+      ][idxAula];
+
+      const card = document.createElement('div');
+      card.className = `bg-white rounded-2xl shadow-lg overflow-hidden border-l-4 ${colores.border}`;
+      card.innerHTML = `
+        <div class="p-4 flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <h2 class="text-xl font-bold text-slate-800">💻 Aula ${aula.nombre}</h2>
+            <p class="text-xs text-slate-500 mt-0.5">Capacidad: ${aula.capacidad}</p>
+          </div>
+          <span class="text-xs px-3 py-1 rounded-full ${colores.chip} font-semibold">6 horas / día</span>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead class="bg-slate-50">
+              <tr>
+                <th class="p-2 text-left text-slate-500 font-medium w-28">Hora</th>
+                ${DIAS.map((d,i)=>{
+                  const fd = new Date(lunes); fd.setDate(lunes.getDate()+i);
+                  const esHoy = mismaFecha(fd, hoy);
+                  return `<th class="p-2 text-center font-semibold ${esHoy?'text-indigo-600':'text-slate-700'}">
+                    ${d}<br><span class="text-xs font-normal ${esHoy?'text-indigo-500':'text-slate-400'}">${fmtCorto(fd)}${esHoy?' • hoy':''}</span>
+                  </th>`;
+                }).join('')}
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      `;
+      const tbody = card.querySelector('tbody');
+
+      HORAS.forEach((hora, hIdx) => {
+        const tr = document.createElement('tr');
+        tr.className = 'border-t border-slate-100' + (hIdx === 3 ? ' recreo' : '');
+        tr.innerHTML = `<td class="p-2 font-medium text-slate-600 bg-slate-50">${hora}</td>`;
+        for(let i=0;i<5;i++){
+          const fd = new Date(lunes); fd.setDate(lunes.getDate()+i);
+          const fISO = fmtISO(fd);
+          const keyRes = reservaKey(aula.id, fISO, hIdx);
+          const reserva = store.reservas[keyRes];
+          const bloq = bloqueoActivo(aula.id, i, hIdx, fISO);
+
+          const td = document.createElement('td');
+          td.className = 'p-1.5 align-middle';
+          let inner = '';
+          if(bloq){
+            const txt = bloq.motivo ? bloq.motivo : 'Bloqueado';
+            inner = `<button class="w-full h-14 rounded-lg bg-rose-300 hover:bg-rose-400 text-rose-900 text-xs font-semibold transition px-1">
+              🔒 ${txt}
+            </button>`;
+            td.dataset.tipo = 'bloqueo';
+          } else if(reserva){
+            inner = `<button class="w-full h-14 rounded-lg bg-blue-500 hover:bg-blue-600 text-white text-xs font-semibold p-1 transition leading-tight">
+              📝 ${reserva.nombre}${reserva.departamento?'<br><span class="font-normal opacity-90">'+reserva.departamento+'</span>':''}
+            </button>`;
+            td.dataset.tipo = 'reserva';
+          } else {
+            inner = `<button class="cell-libre w-full h-14 rounded-lg bg-emerald-50 hover:bg-emerald-100 border-2 border-dashed border-emerald-300 text-emerald-700 text-xs font-medium transition">+ Libre</button>`;
+            td.dataset.tipo = 'libre';
+          }
+          td.innerHTML = inner;
+          td.querySelector('button').addEventListener('click', ()=> onClickCelda(aula.id, fISO, i, hIdx));
+          tr.appendChild(td);
+        }
+        tbody.appendChild(tr);
+      });
+
+      cont.appendChild(card);
+    });
+  }
+
+  // =====================================================================
+  //  AUTENTICACIÓN DE RESPONSABLE
+  // =====================================================================
+  function pedirCodigoAdmin(){
+    if(adminAutenticada) return true;
+    const cod = prompt("🔒 Introduce el código de responsable:", "");
+    if(cod === null) return false;
+    if(cod.trim() !== CODIGO_RESPONSABLE){
+      alert("Código incorrecto. No tienes permisos de responsable.");
+      return false;
+    }
+    adminAutenticada = true;
+    return true;
+  }
+
+  // =====================================================================
+  //  ACCIONES SOBRE CELDAS (con transacciones para evitar conflictos)
+  // =====================================================================
+  async function crearReservaTx(aulaId, fechaISO, diaSemana, horaIdx, nombre, departamento){
+    // Transacción: garantiza que dos profesores no puedan reservar la misma casilla a la vez.
+    const ref = doc(COL_RESERVAS, reservaDocId(aulaId, fechaISO, horaIdx));
+    const bloqRef = doc(COL_BLOQUEOS, bloqueoDocId(aulaId, diaSemana, horaIdx));
+    try {
+      await runTransaction(db, async (tx) => {
+        const snap = await tx.get(ref);
+        if(snap.exists()){
+          throw new Error("YA_RESERVADA");
+        }
+        // Comprobar también que no exista un bloqueo activo en esa fecha
+        const bSnap = await tx.get(bloqRef);
+        if(bSnap.exists()){
+          const items = bSnap.data().items || [];
+          const activo = items.find(b =>
+            compararISO(fechaISO, b.desde) >= 0 &&
+            (b.hasta === null || compararISO(fechaISO, b.hasta) <= 0)
+          );
+          if(activo) throw new Error("BLOQUEADA");
+        }
+        tx.set(ref, { aulaId, fecha: fechaISO, horaIdx, nombre, departamento });
+      });
+    } catch(err){
+      if(err.message === "YA_RESERVADA"){
+        alert("⚠️ Otro profesor acaba de reservar esta hora. Actualiza y elige otra.");
+      } else if(err.message === "BLOQUEADA"){
+        alert("⚠️ Esta hora acaba de ser bloqueada por el responsable.");
+      } else {
+        console.error(err);
+        alert("Error al guardar la reserva. Inténtalo de nuevo.");
+      }
+    }
+  }
+
+  async function cancelarReserva(aulaId, fechaISO, horaIdx){
+    try {
+      await deleteDoc(doc(COL_RESERVAS, reservaDocId(aulaId, fechaISO, horaIdx)));
+    } catch(err){
+      console.error(err);
+      alert("Error al cancelar la reserva.");
+    }
+  }
+
+  // Guarda el array de bloqueos recurrentes para (aula, día, hora).
+  // Si el array queda vacío, elimina el documento.
+  async function guardarBloqueos(aulaId, diaSemana, horaIdx, items){
+    const ref = doc(COL_BLOQUEOS, bloqueoDocId(aulaId, diaSemana, horaIdx));
+    try {
+      if(items.length === 0){
+        await deleteDoc(ref);
+      } else {
+        await setDoc(ref, { aulaId, diaSemana, horaIdx, items });
+      }
+    } catch(err){
+      console.error(err);
+      alert("Error al guardar el bloqueo.");
+    }
+  }
+
+  async function onClickCelda(aulaId, fechaISO, diaSemana, horaIdx){
+    const modo = document.getElementById('modo').value;
+    const pasado = esPasado(fechaISO);
+    const keyRes = reservaKey(aulaId, fechaISO, horaIdx);
+    const reserva = store.reservas[keyRes];
+    const bloq = bloqueoActivo(aulaId, diaSemana, horaIdx, fechaISO);
+
+    if(modo === 'admin'){
+      if(!pedirCodigoAdmin()){
+        document.getElementById('modo').value = 'docente';
+        return;
+      }
+      if(pasado){
+        alert("No se pueden modificar horas del pasado (trazabilidad).");
+        return;
+      }
+      const arrKey = bloqueoKey(aulaId, diaSemana, horaIdx);
+      const arr = (store.bloqueosRec[arrKey] || []).map(b => ({...b}));
+
+      if(bloq){
+        // Desbloquear a partir de esta fecha
+        if(!confirm(`¿Desbloquear esta hora a partir del ${fechaISO}?\n(Las semanas anteriores permanecen bloqueadas para trazabilidad.)`)) return;
+        const idx = arr.findIndex(b => b.desde === bloq.desde && b.hasta === bloq.hasta && b.motivo === bloq.motivo);
+        if(idx === -1) return;
+        if(compararISO(fechaISO, arr[idx].desde) === 0){
+          arr.splice(idx, 1);
+        } else {
+          arr[idx].hasta = restarDia(fechaISO);
+        }
+        await guardarBloqueos(aulaId, diaSemana, horaIdx, arr);
+      } else if(reserva){
+        if(!confirm(`Esta hora tiene una reserva de ${reserva.nombre}. ¿Deseas bloquearla de todas formas a partir de esta semana? (la reserva se eliminará solo en esta fecha)`)) return;
+        const motivo = prompt("Motivo del bloqueo (opcional):", "");
+        if(motivo === null) return;
+        await cancelarReserva(aulaId, fechaISO, horaIdx);
+        arr.push({ desde: fechaISO, hasta: null, motivo: motivo.trim() });
+        await guardarBloqueos(aulaId, diaSemana, horaIdx, arr);
+      } else {
+        const motivo = prompt("Motivo del bloqueo (opcional).\nEsta hora quedará bloqueada TODAS las semanas siguientes hasta que la desbloquees:", "");
+        if(motivo === null) return;
+        arr.push({ desde: fechaISO, hasta: null, motivo: motivo.trim() });
+        await guardarBloqueos(aulaId, diaSemana, horaIdx, arr);
+      }
+    } else {
+      // Docente
+      if(bloq){ alert("Esta hora está bloqueada por el responsable."); return; }
+      if(!reserva){
+        if(pasado){ alert("No se pueden crear reservas en fechas pasadas."); return; }
+        const nombre = prompt("👩‍🏫 Introduce tu nombre y apellidos:", "");
+        if(!nombre || !nombre.trim()) return;
+        const depto = prompt("🏫 Introduce tu departamento:", "");
+        if(depto === null) return;
+        await crearReservaTx(aulaId, fechaISO, diaSemana, horaIdx, nombre.trim(), depto.trim());
+      } else {
+        if(pasado){
+          alert("Esta reserva ya ha pasado y no se puede cancelar (trazabilidad).");
+          return;
+        }
+        const nombre = prompt(`Reservado por "${reserva.nombre}" (${reserva.departamento||'sin depto.'}).\nEscribe el mismo nombre para cancelar:`, "");
+        if(nombre && nombre.trim().toLowerCase() === reserva.nombre.toLowerCase()){
+          await cancelarReserva(aulaId, fechaISO, horaIdx);
+        } else if(nombre){
+          alert("El nombre no coincide. No se puede cancelar.");
+        }
+      }
+    }
+  }
+
+  // =====================================================================
+  //  EVENTOS DE NAVEGACIÓN
+  // =====================================================================
+  document.getElementById('prevWeek').onclick = ()=>{ fechaActual.setDate(fechaActual.getDate()-7); render(); };
+  document.getElementById('nextWeek').onclick = ()=>{ fechaActual.setDate(fechaActual.getDate()+7); render(); };
+  document.getElementById('hoyBtn').onclick   = ()=>{ fechaActual = new Date(); render(); };
+  document.getElementById('selectorSemana').addEventListener('change', (e)=>{
+    const v = e.target.value;
+    if(!v) return;
+    const [y,w] = v.split('-W').map(Number);
+    const simple = new Date(Date.UTC(y,0,1 + (w-1)*7));
+    const dow = simple.getUTCDay();
+    const lunes = new Date(simple);
+    if(dow <= 4) lunes.setUTCDate(simple.getUTCDate() - simple.getUTCDay()+1);
+    else lunes.setUTCDate(simple.getUTCDate() + 8 - simple.getUTCDay());
+    fechaActual = new Date(lunes.getUTCFullYear(), lunes.getUTCMonth(), lunes.getUTCDate());
+    render();
+  });
+  document.getElementById('modo').addEventListener('change', (e)=>{
+    if(e.target.value === 'admin' && !adminAutenticada){
+      if(!pedirCodigoAdmin()) e.target.value = 'docente';
+    }
+    render();
+  });
+
+  // =====================================================================
+  //  EXPORTAR / IMPORTAR / BORRAR (Firestore)
+  // =====================================================================
+  document.getElementById('exportarBtn').onclick = ()=>{
+    if(!pedirCodigoAdmin()) return;
+    const blob = new Blob([JSON.stringify(store,null,2)], {type:'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'reservas-aulas.json'; a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  document.getElementById('importarBtn').onclick = ()=>{
+    if(!pedirCodigoAdmin()) return;
+    const input = document.createElement('input');
+    input.type = 'file'; input.accept = 'application/json';
+    input.onchange = e => {
+      const file = e.target.files[0]; if(!file) return;
+      const reader = new FileReader();
+      reader.onload = async () => {
+        try {
+          const parsed = JSON.parse(reader.result);
+          if(!parsed || !parsed.reservas) throw new Error("formato");
+          if(!confirm("⚠️ Esto REEMPLAZARÁ todos los datos en Firestore por los del archivo. ¿Continuar?")) return;
+          setSync('sync-loading', '⏳ Importando…');
+
+          // Borrar todo lo actual
+          const [snapR, snapB] = await Promise.all([getDocs(COL_RESERVAS), getDocs(COL_BLOQUEOS)]);
+          const batchDel = writeBatch(db);
+          snapR.forEach(d => batchDel.delete(d.ref));
+          snapB.forEach(d => batchDel.delete(d.ref));
+          await batchDel.commit();
+
+          // Escribir reservas importadas
+          const batchIns = writeBatch(db);
+          Object.entries(parsed.reservas).forEach(([k, v]) => {
+            const [aulaId, fecha, horaIdxStr] = k.split('|');
+            const horaIdx = Number(horaIdxStr);
+            batchIns.set(doc(COL_RESERVAS, reservaDocId(aulaId, fecha, horaIdx)), {
+              aulaId, fecha, horaIdx,
+              nombre: v.nombre || '',
+              departamento: v.departamento || ''
+            });
+          });
+          // Escribir bloqueos importados
+          Object.entries(parsed.bloqueosRec || {}).forEach(([k, items]) => {
+            const [aulaId, diaSemanaStr, horaIdxStr] = k.split('|');
+            const diaSemana = Number(diaSemanaStr);
+            const horaIdx = Number(horaIdxStr);
+            if(Array.isArray(items) && items.length > 0){
+              batchIns.set(doc(COL_BLOQUEOS, bloqueoDocId(aulaId, diaSemana, horaIdx)), {
+                aulaId, diaSemana, horaIdx, items
+              });
+            }
+          });
+          await batchIns.commit();
+          alert("Datos importados correctamente.");
+        }
+        catch(err){
+          console.error(err);
+          alert("Archivo no válido o error al importar.");
+        }
+      };
+      reader.readAsText(file);
+    };
+    input.click();
+  };
+
+  document.getElementById('resetBtn').onclick = async ()=>{
+    if(!pedirCodigoAdmin()) return;
+    if(!confirm("¿Borrar reservas FUTURAS y todos los bloqueos activos? (las reservas pasadas se conservan para trazabilidad)")) return;
+    try {
+      setSync('sync-loading', '⏳ Borrando…');
+      const hoyISO = fmtISO(new Date());
+
+      // 1) Borrar reservas futuras
+      const batch = writeBatch(db);
+      const snapR = await getDocs(COL_RESERVAS);
+      snapR.forEach(d => {
+        const data = d.data();
+        if(data.fecha && !esPasado(data.fecha)) batch.delete(d.ref);
+      });
+
+      // 2) Cerrar bloqueos activos a día de hoy
+      const snapB = await getDocs(COL_BLOQUEOS);
+      snapB.forEach(d => {
+        const data = d.data();
+        const items = (data.items || []).filter(b => {
+          if(b.hasta === null || compararISO(b.hasta, hoyISO) >= 0){
+            if(compararISO(b.desde, hoyISO) >= 0) return false; // aún no empezaba: descartar
+            b.hasta = restarDia(hoyISO);
+          }
+          return true;
+        });
+        if(items.length === 0) batch.delete(d.ref);
+        else batch.set(d.ref, { aulaId: data.aulaId, diaSemana: data.diaSemana, horaIdx: data.horaIdx, items });
+      });
+
+      await batch.commit();
+    } catch(err){
+      console.error(err);
+      alert("Error al borrar los datos.");
+    }
+  };
+
+  // Primer render (aparecerá vacío hasta que llegue el snapshot inicial)
+  render();
+</script>
+</body>
+</html>
